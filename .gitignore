@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# 密钥，切勿提交
+.env
+
+# 生成产物
+tmp/
+docs/eval/*.jsonl

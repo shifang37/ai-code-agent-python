@@ -1,0 +1,77 @@
+[project]
+name = "ai-code-agent"
+version = "0.1.0"
+description = "AI 代码生成 Agent — Python / LangChain / LangGraph 实现"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "python-multipart>=0.0.12",
+    # LLM / Agent
+    "langchain>=0.3.7",
+    "langchain-core>=0.3.15",
+    "langchain-openai>=0.2.8",
+    "langgraph>=0.2.45",
+    "langgraph-checkpoint>=2.0.2",
+    # 持久化
+    "sqlalchemy[asyncio]>=2.0.36",
+    "aiomysql>=0.2.0",
+    "redis>=5.2.0",
+    # 工具
+    "httpx>=0.27.2",
+    "itsdangerous>=2.2.0",
+    "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+# 可降级的附属能力：缺失时对应功能自动跳过
+media = [
+    "cos-python-sdk-v5>=1.9.30",
+    "dashscope>=1.20.0",
+]
+screenshot = [
+    "selenium>=4.26.0",
+    "webdriver-manager>=4.0.2",
+]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "FURB", "ISC"]
+ignore = [
+    # 降级路径大量使用宽异常捕获：图片工具、COS、截图任何一环挂掉都只该记日志、
+    # 返回空值，绝不能冒泡打断代码生成主流程。这是设计选择，不是疏忽。
+    "BLE001",
+    # 时间字段要与既有 MySQL DATETIME 列（无时区）对齐，两版服务共用同一套表，
+    # 这里改成 aware datetime 反而会和 Java 版写入的数据不一致。
+    "DTZ",
+    # FastAPI 的依赖项/查询参数默认值就是函数调用（Depends()、Query()），是框架惯例。
+    "B008",
+    # 本项目注释、文档字符串、提示词全部是中文，全角标点是正常书写，
+    # 不是「看起来像半角的易混字符」。开着会淹没所有真实告警。
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 评测脚本里的长中文提示词需要按行拆分，隐式拼接可读性更好
+"evals/*.py" = ["ISC"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
