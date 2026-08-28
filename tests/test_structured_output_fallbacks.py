@@ -68,3 +68,81 @@ def test_候选词去重且限量():
 
 def test_过短的词被跳过():
     assert _undraw_fallback_terms("a of go team") == ["team"]
+
+
+# ---------------------------------------------------------------- 计划子任务容错
+
+
+def test_一条填错的图表任务不连累其余素材():
+    """实测模型给 diagramTasks 填的是 {"query": ...}，而 schema 要 mermaidCode。
+
+    若子任务字段是必填，pydantic 会让**整个计划**校验失败，内容图/插画/Logo
+    全部一起丢——一条填错的任务废掉全部素材收集。
+    """
+    plan = ImageCollectionPlan.model_validate(
+        {
+            "contentImageTasks": [{"query": "coffee shop"}],
+            "illustrationTasks": [{"query": "team"}],
+            # 模型填错的图表任务：给了 query 而非 mermaidCode
+            "diagramTasks": [{"query": "收入支出统计流程图"}],
+            "logoTasks": [{"description": "咖啡品牌 Logo"}],
+        }
+    )
+    # 整个计划仍然解析成功
+    assert len(plan.valid_content_image_tasks) == 1
+    assert len(plan.valid_illustration_tasks) == 1
+    assert len(plan.valid_logo_tasks) == 1
+    # 唯独那条无效的图表任务被剔除
+    assert plan.valid_diagram_tasks == []
+
+
+def test_空白字段的任务被剔除():
+    plan = ImageCollectionPlan.model_validate(
+        {
+            "contentImageTasks": [{"query": "  "}, {"query": "cat"}],
+            "logoTasks": [{"description": None}],
+        }
+    )
+    assert [t.query for t in plan.valid_content_image_tasks] == ["cat"]
+    assert plan.valid_logo_tasks == []
+
+
+# ---------------------------------------------------------------- IPv6 连接回退
+
+
+async def test_连接失败时改用_ipv4_重试(monkeypatch):
+    """httpx 不做 Happy Eyeballs：DNS 把 IPv6 排前面而 IPv6 不通时，
+    它直接抛 ConnectError，不会去试后面的 IPv4（curl 会，所以 curl 一直正常）。
+    表现是「图片收集时灵时不灵」，随 DNS 顺序漂移。
+    """
+    import httpx
+
+    from app.media import images
+
+    attempts: list[bool] = []
+
+    class _FakeClient:
+        def __init__(self, *_, **kwargs):
+            # transport 被指定即代表这是强制 IPv4 的那次重试
+            self.forced_ipv4 = "transport" in kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def get(self, *_, **__):
+            attempts.append(self.forced_ipv4)
+            if not self.forced_ipv4:
+                raise httpx.ConnectError("IPv6 不通")
+            return httpx.Response(200, json={"photos": []})
+
+    monkeypatch.setattr(images.httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setattr(images.httpx, "AsyncHTTPTransport", lambda **_: object())
+
+    resp = await images._get_with_fallback("https://example.com")
+
+    assert resp.status_code == 200
+    # 先按默认走一次，失败后用 IPv4 再来一次
+    assert attempts == [False, True]

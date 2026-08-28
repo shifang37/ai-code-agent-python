@@ -65,10 +65,27 @@ DeepSeek 不支持 OpenAI 的 `json_schema` 响应格式，直接返回
 并补了配套样式规则），`dist/` 正常产出。确认是 LLM 经 `writeFile` 工具真实修复，
 不是任何形式的缓存或回滚。
 
-## 3. 图片素材收集
+## 3. 构建端到端（build-selfheal，standard 组）
+
+从零跑完整工作流直到 `npm run build` 成功，10 条典型 CRUD 型 Vue 需求。
+
+| | Java 基线 | Python |
+|---|---|---|
+| 构建成功 | 10/10 | **10/10** |
+| 首轮直通 | 10/10 | **10/10** |
+
+单例耗时 108–237 秒（含真实 `npm install` + 完整生成 + 构建）。
+逐个核对产物：10 个项目均产出 `dist/index.html` 与打包 JS，源码 9–17 个文件。
+
+这一轮跑在**加固后的构建路径**上（`--ignore-scripts` + 环境变量白名单），
+因此也顺带验证了沙箱加固没有破坏正常构建。
+
+复现：`python -m evals.build_selfheal_eval standard`
+
+## 4. 图片素材收集
 
 初次评测时报告为「本机访问不到 Pexels/undraw，降级路径生效」——**这个结论是错的**，
-复查后是两个真实缺陷，均已修复：
+复查后是四个真实缺陷，均已修复：
 
 1. **图片收集计划返回 `None`**。`with_structured_output` 在模型不调工具、直接回文本时
    返回 None 而非抛错；节点里 `None.contentImageTasks` 抛的 AttributeError 又被
@@ -78,21 +95,28 @@ DeepSeek 不支持 OpenAI 的 `json_schema` 响应格式，直接返回
    （`mMWmJSt23qpgo8cLTD_pB`），官方发版后变成 `9SMsYpCjXCftNdh3cu_8Q`，请求恒 404 ——
    也就是说这个功能在 Java 版里一直是全废的，只是失败被当成网络问题静默降级了。
    现改为运行时从搜索页抓取 buildId 并缓存，遇 404 刷新一次重试。
+3. **一条填错的子任务废掉整个计划**。模型给 `diagramTasks` 填的是
+   `{"query": "收入支出统计流程图"}`，而 schema 要求 `mermaidCode`；子任务字段是必填时，
+   pydantic 会让**整个计划**校验失败，内容图、插画、Logo 全部一起丢。
+   现在子任务字段全部可选，由 `valid_*` 属性逐条过滤，坏任务只影响它自己。
+4. **httpx 不做 Happy Eyeballs 回退**。这些图床的 DNS 常把 IPv6 排在前面，而本机到
+   它们的 IPv6 不通，httpx 直接抛 ConnectError 而不去试后面的 IPv4（curl 会做双栈竞速，
+   所以 curl 一直正常）。表现是「时灵时不灵」，随 DNS 顺序漂移。
+   现在连接失败会用绑定 IPv4 的传输重试一次。
 
-另外发现 undraw 的搜索只对短词有效（`coffee` 有 12 条，`coffee culture illustration`
+另外 undraw 的搜索只对短词有效（`coffee` 有 12 条，`coffee culture illustration`
 是 0 条），而规划模型产出的是描述性长短语（对 Pexels 正合适）。已加单词级降级重试。
 
-修复后实测（咖啡店官网需求）：收集到 72 张 —— 60 张 Pexels 内容图 + 12 张 undraw 插画。
+修复后实测（记账本需求，即当初触发计划校验失败的那条）：**0 张 → 82 张**
+（48 张 Pexels 内容图 + 34 张 undraw 插画）。
 Logo 一路需要 `pip install '.[media]'` 装 dashscope，未装时按预期跳过。
 
 回归测试见 `tests/test_structured_output_fallbacks.py`。
 
-## 4. 未覆盖项
+## 5. 未覆盖项
 
-- **构建端到端（build-selfheal）**：脚本已移植（`evals/build_selfheal_eval.py`，
-  standard 10 例 / complex 5 例，提示词与 Java 版逐字一致），**本次未执行** ——
-  每例都要真跑 `npm install` + 完整生成，耗时以十分钟计。
-  复现：`python -m evals.build_selfheal_eval standard`
 - **faithful 臂**（先完整生成再注入，用于对照「生成记忆」带来的增益）脚本未移植，
   cold 臂已足以度量能力下界。
+- **complex 组**（5 条高复杂度需求，Java 基线 4/5 首轮直通、经 1 轮修复后 5/5）未执行。
+  复现：`python -m evals.build_selfheal_eval complex`
 - **Mermaid 架构图**需要本机装 `mmdc` 且配置 COS，未验证。

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -41,20 +42,69 @@ _undraw_build_id: str | None = None
 _undraw_lock = asyncio.Lock()
 
 
+@asynccontextmanager
+async def _http_client(**kwargs):
+    """带 IPv4 回退的 HTTP 客户端。
+
+    httpx 按 DNS 返回顺序逐个尝试地址，但**不做 Happy Eyeballs（RFC 8305）回退**：
+    这些图床的 DNS 常把 IPv6 排在前面，而不少网络环境到它们的 IPv6 不通，
+    于是 httpx 直接抛 ConnectError 而不去试后面的 IPv4 —— curl 同样的地址却一直正常，
+    因为 curl 会做双栈竞速。表现就是「图片收集时灵时不灵」，随 DNS 顺序漂移。
+
+    这里先按默认行为走（IPv6 可用时照常用），连接失败再用绑定 IPv4 的传输重试一次。
+    """
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, **kwargs) as client:
+        yield client
+
+
+async def _get_with_fallback(url: str, **request_kwargs) -> httpx.Response:
+    """发一个 GET，遇连接错误时用强制 IPv4 的传输重试一次。"""
+    client_kwargs = {"follow_redirects": True}
+    try:
+        async with _http_client(**client_kwargs) as client:
+            return await client.get(url, **request_kwargs)
+    except httpx.ConnectError:
+        logger.info("连接失败（多半是 IPv6 不通），改用 IPv4 重试: %s", url)
+        transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+        async with _http_client(transport=transport, **client_kwargs) as client:
+            return await client.get(url, **request_kwargs)
+
+
+@asynccontextmanager
+async def _undraw_client():
+    """undraw 一次搜索要打多个请求（抓 buildId + 若干候选词），共用一个连接池。
+
+    先探一次连通性决定用不用 IPv4 传输——比每个请求各自重试省事，
+    也避免 buildId 抓取成功、后续查询却失败的割裂状态。
+    """
+    kwargs: dict = {"follow_redirects": True}
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, **kwargs) as probe:
+            await probe.head(UNDRAW_SEARCH_PAGE)
+    except httpx.ConnectError:
+        logger.info("undraw 连接失败（多半是 IPv6 不通），改用 IPv4")
+        kwargs["transport"] = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+    except Exception:
+        pass  # 非连接类错误交给真正的请求去暴露
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, **kwargs) as client:
+        yield client
+
+
+
 async def search_content_images(query: str) -> list[ImageResource]:
     """Pexels 内容图搜索。"""
     if not settings.pexels_api_key:
         logger.warning("未配置 PEXELS_API_KEY，跳过内容图搜索")
         return []
     try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            resp = await client.get(
-                PEXELS_API_URL,
-                headers={"Authorization": settings.pexels_api_key},
-                params={"query": query, "per_page": SEARCH_COUNT, "page": 1},
-            )
-            resp.raise_for_status()
-            photos = resp.json().get("photos", [])
+        resp = await _get_with_fallback(
+            PEXELS_API_URL,
+            headers={"Authorization": settings.pexels_api_key},
+            params={"query": query, "per_page": SEARCH_COUNT, "page": 1},
+        )
+        resp.raise_for_status()
+        photos = resp.json().get("photos", [])
     except Exception as e:
         logger.error("Pexels API 调用失败: %s", e)
         return []
@@ -130,7 +180,7 @@ async def search_illustrations(query: str) -> list[ImageResource]:
     两层健壮性：构建哈希运行时抓取并在 404 时刷新；长短语搜不到就降级到单词重试。
     """
     try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+        async with _undraw_client() as client:
             results = await _undraw_query(client, query)
             if not results:
                 for term in _undraw_fallback_terms(query):
@@ -236,10 +286,10 @@ async def collect_images(plan: ImageCollectionPlan) -> list[ImageResource]:
     与 Java 版逐个 CompletableFuture 吞异常的行为一致。
     """
     tasks = []
-    tasks += [search_content_images(t.query) for t in plan.contentImageTasks]
-    tasks += [search_illustrations(t.query) for t in plan.illustrationTasks]
-    tasks += [generate_mermaid_diagram(t.mermaidCode, t.description) for t in plan.diagramTasks]
-    tasks += [generate_logos(t.description) for t in plan.logoTasks]
+    tasks += [search_content_images(t.query) for t in plan.valid_content_image_tasks]
+    tasks += [search_illustrations(t.query) for t in plan.valid_illustration_tasks]
+    tasks += [generate_mermaid_diagram(t.mermaidCode, t.description) for t in plan.valid_diagram_tasks]
+    tasks += [generate_logos(t.description) for t in plan.valid_logo_tasks]
 
     if not tasks:
         return []
