@@ -9,6 +9,7 @@ DashScope 文生 Logo。
 
 import asyncio
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -24,12 +25,20 @@ from app.media.cos import upload_file
 logger = logging.getLogger(__name__)
 
 PEXELS_API_URL = "https://api.pexels.com/v1/search"
-# undraw 这个接口带 Next.js 构建哈希，官方一发版就会失效——
-# 拿不到结果属预期内，静默降级即可，不必当故障处理。
-UNDRAW_API_URL = "https://undraw.co/_next/data/mMWmJSt23qpgo8cLTD_pB/search/{q}.json?term={q}"
+
+# undraw 的搜索数据接口路径里带 Next.js 构建哈希，官方每次发版都会变。
+# Java 版把哈希写死在代码里，结果早已 404（实测硬编码的 mMWmJSt23qpgo8cLTD_pB
+# 已失效，当前是 9SMsYpCjXCftNdh3cu_8Q）——而且失败被当成「网络问题」静默降级，
+# 插画功能其实一直是全废的。这里改成运行时从搜索页抓取并缓存，遇 404 刷新一次重试。
+UNDRAW_SEARCH_PAGE = "https://undraw.co/search"
+UNDRAW_DATA_URL = "https://undraw.co/_next/data/{build_id}/search/{q}.json?term={q}"
+UNDRAW_BUILD_ID_PATTERN = re.compile(r'"buildId":"([^"]+)"')
 
 SEARCH_COUNT = 12
 HTTP_TIMEOUT = 10.0
+
+_undraw_build_id: str | None = None
+_undraw_lock = asyncio.Lock()
 
 
 async def search_content_images(query: str) -> list[ImageResource]:
@@ -61,13 +70,76 @@ async def search_content_images(query: str) -> list[ImageResource]:
     ]
 
 
+async def _fetch_undraw_build_id(client: httpx.AsyncClient) -> str | None:
+    """从 undraw 搜索页抓当前的 Next.js 构建哈希。"""
+    resp = await client.get(UNDRAW_SEARCH_PAGE)
+    resp.raise_for_status()
+    match = UNDRAW_BUILD_ID_PATTERN.search(resp.text)
+    if match is None:
+        logger.warning("未能从 undraw 页面解析出 buildId，页面结构可能已变更")
+        return None
+    return match.group(1)
+
+
+async def _get_undraw_build_id(client: httpx.AsyncClient, force_refresh: bool = False) -> str | None:
+    global _undraw_build_id
+    async with _undraw_lock:
+        if _undraw_build_id is None or force_refresh:
+            _undraw_build_id = await _fetch_undraw_build_id(client)
+        return _undraw_build_id
+
+
+async def _undraw_query(client: httpx.AsyncClient, term: str) -> list[dict]:
+    """查一个词。命中 404 说明缓存的 buildId 已过期，刷新一次再重试。"""
+    build_id = await _get_undraw_build_id(client)
+    if build_id is None:
+        return []
+
+    resp = await client.get(UNDRAW_DATA_URL.format(build_id=build_id, q=term))
+    if resp.status_code == 404:
+        logger.info("undraw buildId 已过期，刷新后重试")
+        build_id = await _get_undraw_build_id(client, force_refresh=True)
+        if build_id is None:
+            return []
+        resp = await client.get(UNDRAW_DATA_URL.format(build_id=build_id, q=term))
+
+    resp.raise_for_status()
+    return resp.json().get("pageProps", {}).get("initialResults") or []
+
+
+def _undraw_fallback_terms(query: str) -> list[str]:
+    """把多词短语拆成候选单词。
+
+    undraw 的搜索只对短词有效：实测 `coffee` 有 12 条，
+    `coffee culture illustration` 是 0 条。而图片规划模型产出的是描述性长短语
+    （对 Pexels 正好，对 undraw 全落空），所以要降级到单词重试。
+    `illustration` 之类的词本身就是品类名，拿去搜没有意义，先剔掉。
+    """
+    noise = {"illustration", "illustrations", "icon", "image", "picture", "art"}
+    words = [w for w in re.split(r"[\s,_-]+", query.lower()) if len(w) > 2 and w not in noise]
+    # 保序去重，最多试 3 个，避免为一条插画打太多次请求
+    seen: dict[str, None] = {}
+    for w in words:
+        seen.setdefault(w, None)
+    return list(seen)[:3]
+
+
 async def search_illustrations(query: str) -> list[ImageResource]:
-    """undraw 插画搜索（爬 Next.js 数据接口，无需 key）。"""
+    """undraw 插画搜索（爬 Next.js 数据接口，无需 key）。
+
+    两层健壮性：构建哈希运行时抓取并在 404 时刷新；长短语搜不到就降级到单词重试。
+    """
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
-            resp = await client.get(UNDRAW_API_URL.format(q=query))
-            resp.raise_for_status()
-            results = resp.json().get("pageProps", {}).get("initialResults") or []
+            results = await _undraw_query(client, query)
+            if not results:
+                for term in _undraw_fallback_terms(query):
+                    if term == query.lower():
+                        continue  # 单词查询已经试过，别重复打一次
+                    results = await _undraw_query(client, term)
+                    if results:
+                        logger.info("undraw 长短语无结果，降级用 %r 命中 %d 条", term, len(results))
+                        break
     except Exception as e:
         logger.error("搜索插画失败：%s", e)
         return []

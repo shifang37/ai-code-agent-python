@@ -65,18 +65,34 @@ DeepSeek 不支持 OpenAI 的 `json_schema` 响应格式，直接返回
 并补了配套样式规则），`dist/` 正常产出。确认是 LLM 经 `writeFile` 工具真实修复，
 不是任何形式的缓存或回滚。
 
-## 3. 构建端到端（build-selfheal）
+## 3. 图片素材收集
 
-脚本已移植（`evals/build_selfheal_eval.py`，standard 10 例 / complex 5 例，
-提示词与 Java 版逐字一致），**本次未执行** —— 每例都要真跑 `npm install` +
-完整生成，耗时以十分钟计。
+初次评测时报告为「本机访问不到 Pexels/undraw，降级路径生效」——**这个结论是错的**，
+复查后是两个真实缺陷，均已修复：
 
-复现：`python -m evals.build_selfheal_eval standard`
+1. **图片收集计划返回 `None`**。`with_structured_output` 在模型不调工具、直接回文本时
+   返回 None 而非抛错；节点里 `None.contentImageTasks` 抛的 AttributeError 又被
+   节点自身的宽异常捕获吞掉，最终只表现为「收集到 0 张图」。三处结构化输出调用
+   现已全部显式处理 None（`app/llm/services.py`）。
+2. **undraw 接口的构建哈希已过期**。Java 版把 Next.js buildId 硬编码在 URL 里
+   （`mMWmJSt23qpgo8cLTD_pB`），官方发版后变成 `9SMsYpCjXCftNdh3cu_8Q`，请求恒 404 ——
+   也就是说这个功能在 Java 版里一直是全废的，只是失败被当成网络问题静默降级了。
+   现改为运行时从搜索页抓取 buildId 并缓存，遇 404 刷新一次重试。
+
+另外发现 undraw 的搜索只对短词有效（`coffee` 有 12 条，`coffee culture illustration`
+是 0 条），而规划模型产出的是描述性长短语（对 Pexels 正合适）。已加单词级降级重试。
+
+修复后实测（咖啡店官网需求）：收集到 72 张 —— 60 张 Pexels 内容图 + 12 张 undraw 插画。
+Logo 一路需要 `pip install '.[media]'` 装 dashscope，未装时按预期跳过。
+
+回归测试见 `tests/test_structured_output_fallbacks.py`。
 
 ## 4. 未覆盖项
 
+- **构建端到端（build-selfheal）**：脚本已移植（`evals/build_selfheal_eval.py`，
+  standard 10 例 / complex 5 例，提示词与 Java 版逐字一致），**本次未执行** ——
+  每例都要真跑 `npm install` + 完整生成，耗时以十分钟计。
+  复现：`python -m evals.build_selfheal_eval standard`
 - **faithful 臂**（先完整生成再注入，用于对照「生成记忆」带来的增益）脚本未移植，
   cold 臂已足以度量能力下界。
-- **图片素材工具**在本次评测环境中无法访问外网（Pexels / undraw 均 ConnectError），
-  降级路径按预期生效：记录 warning、返回空列表、主流程继续。缺 key 或断网时的
-  行为已验证，但工具本身的正确性未在真实网络下回归。
+- **Mermaid 架构图**需要本机装 `mmdc` 且配置 COS，未验证。
