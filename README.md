@@ -63,7 +63,7 @@ app/
 ├─ media/               图片素材工具（全部可降级）
 └─ services/            用户 / 应用 / 对话历史 / 截图
 evals/                  三套评测（见 docs/eval/README.md）
-tests/                  42 个单元测试
+tests/                  54 个单元测试
 ```
 
 ## 相对 Java 版的改动
@@ -83,9 +83,20 @@ tests/                  42 个单元测试
   两道防线——路径穿越校验（403）与 CSP `sandbox`（**不含 `allow-same-origin`**，
   使预览页处于 opaque origin，读不到主站 Cookie / localStorage）。
   `tests/test_preview_sandbox.py` 锁住这两条。
-- **构建沙箱缺失**：`npm install` / `npm run build` 以普通子进程在服务进程的权限下运行，
-  没有容器或 jail。任意 npm 包的 postinstall 脚本会在宿主机执行。
-  这一点与 Java 版相同，生产部署前应补上隔离。
+- **文件工具边界**：工具入参是模型生成的不可信输入，统一校验解析后仍在项目根内，
+  越界直接拒绝（`app/agent/tools.py`）。
+- **构建沙箱**：`npm run build` 执行的 `vite.config.js` 本身就是模型写的代码，
+  构建阶段必然在宿主机上跑不可信 JS。代码层面做了三层收敛（`app/agent/builder.py`）：
+  1. `npm install --ignore-scripts` —— 掐掉任意 npm 包的 postinstall，这是
+     「装个包即在宿主机执行任意命令」的主入口。实测生成项目照常构建成功。
+  2. **环境变量白名单** —— 子进程默认继承父进程全部环境变量（实测 106 个，含
+     LLM API Key、数据库口令、COS 密钥），一句 `process.env.LLM_API_KEY` 就能读走外传。
+     现只透传 node/npm 必需的 21 个。`tests/test_build_sandbox.py` 锁住这条。
+  3. 超时强杀。
+
+  **残留风险**：构建仍在宿主机执行不可信 JS，可读写当前用户有权访问的文件、发起网络请求。
+  要真正封住需要容器 / 虚拟机 / 独立低权限账户级别的隔离 —— 那是部署形态的事，
+  代码层面做不到，生产环境务必补上。
 - **密钥轮换**：Java 版仓库里提交过真实的 DeepSeek / Pexels / DashScope / 腾讯云 COS
   凭据（`application-local.yml`）。它们已进入 git 历史，**应当全部轮换**。
 
