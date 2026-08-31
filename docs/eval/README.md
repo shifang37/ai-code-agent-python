@@ -65,22 +65,41 @@ DeepSeek 不支持 OpenAI 的 `json_schema` 响应格式，直接返回
 并补了配套样式规则），`dist/` 正常产出。确认是 LLM 经 `writeFile` 工具真实修复，
 不是任何形式的缓存或回滚。
 
-## 3. 构建端到端（build-selfheal，standard 组）
+## 3. 构建端到端（build-selfheal）
 
-从零跑完整工作流直到 `npm run build` 成功，10 条典型 CRUD 型 Vue 需求。
+从零跑完整工作流直到 `npm run build` 成功。standard 组是 10 条典型 CRUD 型需求，
+complex 组是 5 条刻意挑选的高复杂度需求（更容易首轮构建失败，用来真正压到自修复回路）。
 
 | | Java 基线 | Python |
 |---|---|---|
-| 构建成功 | 10/10 | **10/10** |
-| 首轮直通 | 10/10 | **10/10** |
+| standard 构建成功 | 10/10 | **10/10** |
+| standard 首轮直通 | 10/10 | **10/10** |
+| complex 构建成功 | 5/5 | **5/5** |
+| complex 首轮直通 | 4/5 | **3/5**（其余 2 例各经 1 轮修复） |
 
-单例耗时 108–237 秒（含真实 `npm install` + 完整生成 + 构建）。
-逐个核对产物：10 个项目均产出 `dist/index.html` 与打包 JS，源码 9–17 个文件。
+单例耗时：standard 108–237 秒，complex 337–463 秒（含真实 `npm install` + 完整生成 + 构建）。
+逐个核对产物：15 个项目全部产出 `dist/index.html` 与打包 JS，源码 9–18 个文件。
 
-这一轮跑在**加固后的构建路径**上（`--ignore-scripts` + 环境变量白名单），
+两轮都跑在**加固后的构建路径**上（`--ignore-scripts` + 环境变量白名单），
 因此也顺带验证了沙箱加固没有破坏正常构建。
 
-复现：`python -m evals.build_selfheal_eval standard`
+### complex 组触发的两次自修复（自然发生，非注入）
+
+| 例 | 首轮构建报错 | 结果 |
+|---|---|---|
+| #2 可视化表单设计器 | `SyntaxError: Invalid end tag.`（模板语法） | 1 轮修复后构建成功 |
+| #3 多语言电商后台 | `RollupError: "t" is not exported by "src/utils/i18n.js", imported by "src/pages/Login.vue"`（**跨文件**命名导出缺失） | 1 轮修复后构建成功 |
+
+第 #3 例值得单独说：它是**跨文件**根因——报错文件是 `Login.vue`，真正要改的是
+`i18n.js`。修复后核对，`i18n.js` 里确实补上了 `export function t(key, params)`，
+与 `Login.vue` 的 `import { t }` 对上，项目正常打包。这类故障在故障注入评测里
+对应 I2 类，是最难的一档，这里是在真实生成流程中自然出现并被修好的。
+
+Python 版 complex 首轮直通 3/5 略低于 Java 的 4/5，但样本只有 5 例、单例差异即 20 个百分点，
+两者都落在「多数首轮通过、失败者一轮内修好」的同一区间，不足以区分优劣。
+终局指标（构建成功率）两版都是 5/5。
+
+复现：`python -m evals.build_selfheal_eval standard`（或 `complex` / `all`）
 
 ## 4. 图片素材收集
 
@@ -117,6 +136,4 @@ Logo 一路需要 `pip install '.[media]'` 装 dashscope，未装时按预期跳
 
 - **faithful 臂**（先完整生成再注入，用于对照「生成记忆」带来的增益）脚本未移植，
   cold 臂已足以度量能力下界。
-- **complex 组**（5 条高复杂度需求，Java 基线 4/5 首轮直通、经 1 轮修复后 5/5）未执行。
-  复现：`python -m evals.build_selfheal_eval complex`
 - **Mermaid 架构图**需要本机装 `mmdc` 且配置 COS，未验证。

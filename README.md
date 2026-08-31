@@ -106,7 +106,8 @@ tests/                  57 个单元测试
 |---|---|---|
 | 路由准确率 | 97.8% | 98.3% |
 | 故障注入自修复（cold） | 305/305 = 100% | 20/20 = 100% |
-| 构建端到端（standard） | 10/10 首轮直通 | 10/10 首轮直通 |
+| 构建端到端 standard | 10/10 首轮直通 | 10/10 首轮直通 |
+| 构建端到端 complex | 5/5 成功（4/5 首轮直通） | 5/5 成功（3/5 首轮直通） |
 
 详见 [docs/eval/README.md](docs/eval/README.md)，含样本量差异与复现命令。
 
@@ -114,5 +115,5 @@ tests/                  57 个单元测试
 python -m pytest                              # 单元测试
 python -m evals.routing_eval 3                # 路由准确率
 python -m evals.fault_injection_eval          # 故障注入自修复
-python -m evals.build_selfheal_eval standard  # 构建端到端（耗时以十分钟计）
+python -m evals.build_selfheal_eval all       # 构建端到端（耗时以十分钟计）
 ```
