@@ -165,7 +165,10 @@ async def main(limit: int | None = None) -> None:
         print(f"  {label}: {n_ok}/{len(rs)}")
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    out = REPORT_DIR / "fault-injection-python.jsonl"
+    # 只跑了一部分用例时写到单独的文件：调试性的小批量重跑不该覆盖完整跑的明细，
+    # 否则报告里的数字与磁盘产物对不上，事后无从复核。
+    name = "fault-injection.jsonl" if limit is None else "fault-injection-partial.jsonl"
+    out = REPORT_DIR / name
     with out.open("w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")

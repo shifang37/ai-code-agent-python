@@ -110,11 +110,15 @@ async def main(group_name: str = "standard") -> None:
         print(f"{group}: 构建成功 {len(ok)}/{len(rs)}，其中首轮直通 {len(first)}")
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    out = REPORT_DIR / "build-eval-python.jsonl"
-    with out.open("w", encoding="utf-8") as f:
-        for r in results:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    print(f"\n明细已写入 {out}")
+    # 按组分文件写：跑 complex 不该把 standard 的明细冲掉，
+    # 否则报告里引用的数字与磁盘上的产物对不上，事后无从复核。
+    for group in groups:
+        rows = [r for r in results if r["group"] == group]
+        out = REPORT_DIR / f"build-eval-{group}.jsonl"
+        with out.open("w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(f"\n{group} 组明细已写入 {out}")
 
 
 if __name__ == "__main__":

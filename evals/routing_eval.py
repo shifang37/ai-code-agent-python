@@ -75,7 +75,7 @@ async def main(rounds: int = 3) -> None:
             print(f"  {exp} -> {act}: {count}")
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    out = REPORT_DIR / "routing-eval-python.jsonl"
+    out = REPORT_DIR / "routing-eval.jsonl"
     with out.open("w", encoding="utf-8") as f:
         for r in all_results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
